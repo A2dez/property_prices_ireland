@@ -1,0 +1,1117 @@
+---
+title: "cleaning property 2010-2021, 2022-"
+output: html_document
+date: "2022-10-02"
+---
+
+```{r}
+property <- readRDS( 'property_pre_post_2022.rds')
+dublin <- readRDS('dublin_properties_with_town_and_postcodes.rds')
+
+View(dublin)
+```
+
+
+To do
+Rerun spelling algorithm
+Fix towns for places with no postcode (done for Dublin)
+Remove like 'dublin 20' from the address
+Use 'Dublin 20' etc for correcting postcodes
+Gaffs with no postcodes have been 'rounded off' to the nearest big town, but gaffs with given postcodes may still be wrong cos entered wrong. Alas?
+<!-- Problems: -->
+<!-- Need to automate the scraping more -->
+```{r}
+library(tidyverse)
+library(lubridate)
+library(magrittr)
+library(glue)
+library(stringdist)
+
+```
+
+
+
+```{r}
+#once year gets to 2022 and on then we need to run the eircode analysis
+# year = 2022
+# #dunno what $FILE is. it looks like a bash variable
+# url_csv =paste0('https://www.propertypriceregister.ie/website/npsra/ppr/npsra-ppr.nsf/Downloads/PPR-', year, '.csv/$FILE/PPR-', year, '.csv')
+# urs_csv = "https://www.propertypriceregister.ie/website/npsra/pprweb.nsf/PPRDownloads?OpenForm&File=PPR-2022.csv&County=ALL&Year=2022&Month=ALL"
+
+csv_2022_path <- '/Users/desryan/Desktop/PPR-2022.csv'
+
+property_2022 <- read_csv(csv_2022_path, skip = 1, col_names =  F) 
+
+# table(property_2022$X9, useNA = 'ifany')
+# nrow(property_2022) # 
+#so I manually downloaded a csv for each year's data and saved them in a folder called 'data'
+property_2022 <- read_csv(csv_2022_path, 
+                       col_names = c('date', 
+                                     'address', 
+                                     'county', 
+                                     'eircode',                                   
+                                     'price', 
+                                     'market_price', 
+                                     'vat', 
+                                     'description', 
+                                     'size'), 
+                       col_types = "ccccccccc", #fastest import then deal with 
+                       skip = 1)
+
+# property_2022 %>% view
+# postcode = first three alnums. can't do a-z\\d{2} cos of D6W
+property_2022$postcode <- str_sub(property_2022$eircode, 1, 3)
+
+# property_2022 %>% View
+# filter(property_2022, str_detect(postcode, '6[wW]'))
+# table(property_2022$postcode) %>% as.data.frame %>% View
+```
+
+
+```{r}
+# import take 20 -----------------------------------------------------------
+
+#so I manually downloaded a csv for each year's data and saved them in a folder called 'data
+files <- list.files('data', pattern = '^PPR-\\d{4}.csv') 
+
+property_pre_2022 <- 
+  #keeping only data before 2022 cos these have no eircodes
+  files[ (str_extract(files, "\\d{4}(?=\\.csv)")  %>% as.numeric) < 2022] %>% 
+  map_dfr(  ~ read_csv(glue('data/{.x}'), 
+                       col_names = c('date', 
+                                     'address', 
+                                     'postcode', 
+                                     'county', 
+                                     'price', 
+                                     'market_price', 
+                                     'vat', 
+                                     'description', 
+                                     'size'), 
+                       col_types = "ccccccccc", #fastest import then deal with 
+                       skip = 1), 
+            .id = 'year') #don't read in the column names each time
+
+# Dublin postcodes --------------------------------------------------------
+#These are listed in the pre-Eircode years and need a bit of cleaning. 
+
+#There are 161 address outside Dublin which have postcodes from Dublin, seemingly by mistake. 
+property_pre_2022  <- 
+  property_pre_2022 %>% 
+  mutate(postcode = if_else(county != 'Dublin' & is.na(postcode) == F, 
+                            NA_character_, 
+                            postcode %>% as.character) %>% 
+           as.factor) 
+
+#clean dublin postcode
+#Dublin --> D, 'Baile *tha Cliath' --> D,
+#There are also four instance of 'N? Bhaineaan' --> NA
+property_pre_2022$postcode <- 
+  property_pre_2022$postcode %>% 
+  str_replace('ublin ', '') %>%
+  str_replace('^B.* (?=\\d)', 'D') %>% 
+  str_replace('.*Bhainean', NA_character_) %>% 
+  toupper
+
+#Eircodes are D01, D02, so change D1, D2 for consistency
+property_pre_2022$postcode <- str_replace(property_pre_2022$postcode, 'D(\\d$)', 'D0\\1')  
+
+
+#we still need to remove any rogue Addresses due to typos etc (e.g. Dublin 25)
+# table(property_pre_2022$postcode )
+#order postcodes from 1-24, 
+property_pre_2022$postcode <-
+  property_pre_2022$postcode %>% 
+  factor %>% 
+  fct_reorder( str_extract(property_pre_2022$postcode, '\\d+') %>% as.numeric )
+
+#need to double check if NAs and county are actually different. 
+# property_pre_2022$postcode  %>% table(useNA = 'ifany')
+# table(property$postcode, property$county) %>% as.data.frame %>% filter(Freq > 0) %>% View
+```
+
+
+Put them together
+```{r}
+property <- 
+  bind_rows(property_pre_2022, property_2022) %>% 
+  relocate(eircode, .after = postcode) 
+
+# property %>% View
+# table(property$postcode, property$county) %>% as.data.frame %>% filter (Freq > 0) %>% View
+```
+
+Clean basic columns
+price, date, description, add province
+```{r}
+
+# #NA scan
+# lapply(property, is.na) %>% sapply(table )
+
+
+
+
+# 2. Wrangle data-------------------------------------------------------------------------
+
+# property$price <- property2$price
+#extract sale price as numeric
+property$price %<>% 
+  #first remove decimal points and everything after, then all non-digits
+  str_replace_all('\\..*','') %>% 
+  str_replace_all('\\D', '') %>% 
+  as.numeric
+
+  # is.na %>% table
+
+
+# dates -------------------------------------------------------------------
+
+#make date variables from sale_date
+property$date <- dmy(property$date  ) 
+#add new yeaar, month (jan - dec), weekday (mon - sun), quarter with year
+property$year <- year(property$date)
+property$month <- month(property$date, label = T)
+property$day <- wday(property$date, label = T)
+property$quarter <- quarter(property$date, with_year = T)
+
+property$description <- ifelse(str_detect(property$description, 'Nua$'), 
+                                 'Second-Hand Dwelling house /Apartment', 
+                                 ifelse(str_detect(property$description, '^Teach.*mhe$'), 
+                                        'New Dwelling house /Apartment', 
+                                        property$description))
+
+property$description <- 
+  factor(property$description) %>% 
+  fct_recode('New' = 'New Dwelling house /Apartment',
+             'Old' = 'Second-Hand Dwelling house /Apartment')
+
+# str(property$description)
+
+property$province <- fct_collapse(property$county, 
+             "Leinster" = c('Dublin', 'Laois', 'Meath', "Kilkenny", "Carlow", "Kildare", "Wicklow", 
+                            'Wexford',  'Westmeath', 'Louth', 'Offaly'),
+             "Munster" = c("Cork", 'Clare', 'Limerick', 'Tipperary', 'Waterford', 'Kerry'), 
+             'Connacht-Ulster' = c('Galway', 'Longford','Sligo', 'Mayo', 'Leitrim', 'Roscommon', 'Donegal', 'Monaghan', 'Cavan') ,
+               )
+```
+
+CLEANING SPELLINGS
+
+
+
+
+
+
+
+
+
+Addresses. 
+This is complex
+```{r}
+# Clean addresses ---------------------------------------------------------
+#Title Case Addresses
+property$address <- str_to_title(property$address) #bit too slow
+#remove excess whitespace
+property$address <- str_replace_all(property$address, ' +', ' ')
+
+
+
+# characters_used <- property$address %>% str_c(sollapse = '') %>% str_split('') %>% unlist %>% 
+  # table %>%  sort(decreasing = T) %>% as.data.frame (stringsAsFactors = F) 
+
+# characters_to_remove <- 
+#   characters_used %>% 
+#   rename (character = '.') %>% 
+#   filter(str_detect(character, '[\\w ,&-/]') == F) %>% 
+#   pull(character)
+# View(characters_used)
+
+# "'"  "�"  "("  ")"  ";"  "#"  ":"  "@"  "!"  "\\" "+"  "*"  "?"  "%"  "<"  "~" 
+
+characters_to_remove_regex <- '[\\.�\\(\\);#:@!+*\\?%<~]'
+property$address <- str_replace_all(property$address,characters_to_remove_regex, '' )
+# Need to pre-remove all full stops
+
+#This converts Road to Rd etc. 
+abbreviation_pairs = tibble(
+  replacement = c('Rd', 'St', 'Co', 'Apt', 'Apts', 
+                  'Ave', 'Dr', 'No', 'Sq', 'Pk', 'Fr', 'Ct', 
+                  'Tce', 'Lower', 'Mt', 'Boulevard', 
+                  'Grove', 'Upper', 'Ave', 'Gardens', 
+                  'Bothar', 'Centre'),
+  to_be_replaced = c('Road', 'Street', 'County', 'App?artment|Appt?|Apr)', 'Apartments', 
+                     'Avenue', 'Drive', 'Number', 'Square', 'Park', 'Father', 'C(ou)?rt', 
+                     'Terrace', 'Lw?r', 'Mount', "Blvd", 
+                     'Grv?','Upp?r', 'Av(enue)?', 'Gdns', 
+                     'Br', 'Ctr') 
+)
+
+for(j in seq_along(abbreviation_pairs)){
+  property$address <- str_replace_all(property$address, 
+                                      paste0('\\b', abbreviation_pairs$to_be_replaced[[j]], '\\b'),
+                                      abbreviation_pairs$replacement[[j]])
+}
+
+
+
+#This needs a lot more cleaning in order to extract the sublocations
+
+#Clean misspelt words
+#if the word is nearly in the string, but not the exact word
+#split address by space, 
+# check for rows with misspelt instaance of the word, 
+# replace misspellings with correct spelling, else do nowt. 
+
+```
+
+
+```{r, eval = F}
+spellingclean <- function(correct_spelling, character_vector) {
+  character_vector <-  
+    if_else(agrepl(correct_spelling, character_vector, ignore.case = T) & 
+              str_detect(tolower(character_vector), paste0('\\b', correct_spelling, '\\b')) == F, 
+            str_split(character_vector, ' ') %>% 
+              map_chr( ~ unlist(.x) %>% 
+                         #if there are less than 3 differences between the correct spelling and ANY word in the character vector, then fix it
+                         map(~ if (adist(correct_spelling, .x, ignore.case = T) < 3) .x = word else .x) %>%
+                         map(unlist) %>% str_c(collapse = ' ')),
+            character_vector)
+  return (character_vector)
+}
+
+# #now clean the spelling of misspelt instances of each county ------------------------
+
+#e.g. '17 Ormond Quay, Dubline' --> '17 Ormond Quay, Dublin', 
+#caveat: this function will confuse 'Cong' and 'Cork, as there are just two differences between them
+#so i'm minimising this by running the function on relevant subsections of the data, so places in Mayo 
+#can't get confused with places in Cork. But Mayo-internal or Cork-internal similar matches will cause errors
+#in future, it might be good to just run this function on addresses not allocated a geolocation by Google Maps API
+property <- property %>% 
+  # filter(county == 'Leitrim' | county == 'Longford') %>%
+  group_by(county) %>% 
+  group_split() %>% 
+  map_dfr( ~ .x %>% #take each sub-data-frame and adjust address column as needed
+             mutate(address = spellingclean(.x$county %>% unique, .x$address))
+  )
+
+
+
+# Clean spellings ---------------------------------------------------------
+#the function finds placenames in each county and then searches for near spellings
+#namely words with just one change apart (e.g Dubblin, Dubli although i'm not aure about Dulbin)
+
+
+# property_area_dfrm <- property %>% filter(postcode == 'D10')
+
+fix_misspellings <- function(property_area_dfrm) {
+  
+  #get all of the placenames in the county
+  #keep only thows with 5 letters or more
+  placenames <-
+    property_area_dfrm$address %>% 
+    str_replace_all('[^[[:alpha:]]| ]', '') %>% 
+    str_c(collapse = ' ') %>% 
+    str_split(' ') %>% 
+    unlist %>% 
+    table() %>% 
+    sort (decreasing = T)  %>% 
+    as.data.frame(stringsAsFactors = F) %>% 
+    rename(placename = '.') %>% 
+    slice(2:nrow(.)) %>% 
+    filter(nchar(placename) > 4)
+  
+  # View(placenames)
+  words_appearing_100_times <- which(placenames$Freq > 100) %>% max
+  
+  for (i in 1:words_appearing_100_times) {
+    a <- placenames$placename[[i]]
+    b <- placenames$placename [!placenames$placename %in% a]
+    # cut_off <- if(nchar(a) < 5 ){1} else 2
+    # a <- 'Balbriggan'
+    match <- ( stringdistmatrix(a,b, method = "lv") < 2) %>% as.vector %>% which
+    
+    if(length(b[match]) > 0) {
+      likely_bad_spellings <- paste0('\\b', b[match], '\\b')
+      #fix the spellings for the word in question
+      property_area_dfrm$address <- str_replace_all(property_area_dfrm$address,str_c(likely_bad_spellings, collapse = '|'), a )
+    }
+    
+    #count number of misspellings
+    replacements <- filter(placenames, placenames$placename %in%  b[match]) %>% pull(Freq) %>% sum
+    print(paste(replacements, 'close misspellings of', a, 'have just been replaced'))
+    print(paste('Based on these near spellings:',  str_c(b[match], collapse = ', ')))
+    #remove the error names from the list of places
+    placenames <- placenames %>% filter(!placenames$placename %in%  b[match] )
+  }
+  
+  return(property_area_dfrm)
+  
+}
+
+
+counties <-
+  property %>%
+  group_by(county)  %>%
+  group_split()
+
+property2 <- 
+  lapply(counties, fix_misspellings) %>% 
+  bind_rows() %>% 
+  arrange(date, address)
+
+property <- property2
+
+```
+
+
+
+```{r}
+# property <- 
+#   lapply(counties, fix_misspellings) %>% 
+#   bind_rows() %>% 
+#   arrange(date, address)
+
+
+
+# -------------------------------------------------------------------------
+
+
+
+#We actually need to preprocess the abbreviations so that 'Rd' and 'Road', etc are the normalized
+address_words_after = c('Road', 'Rd', 'Court', 'Ct', 'Drive', 'Dr', 'Avenue', 'Ave', 'Row', 'Street', 'St\\.?',
+                        'Wood','Woods', 'Park','Pk', 'Manor', 'Green', 'Terrace', 'Tce', 'Crescent',
+                        'Rd', 'St', 'Hill',  'House', 'View', 'Lane', 'Place', 'Heights', 
+                        'Cottages?', 'Village', 'Lawns?', 'Grove', 'Way', 'Abbey', 'Walk',
+                        'Grange', 'Lower', 'Upper', 'North', 'South', 'East', 'West', 
+                        'Cross', 'Quay', 'Rise', 'Bay', 'Sq\\.?', 'Square','Close', "New", 'Glen', 
+                        'Mews', 'Island', 'Isl', 'Mill', 'Point', 'Cove', 'Harbour', 'Vale', 
+                        'Bridge', "Oaks", 'M[oó]r','on', 'Suir', 'Heath', 'Lodge', 'Gate',
+                        'Meadows?', 'Villas', 'Apt\\.?s?','Apartments?', 'Estate', 'Farm', 
+                        'Downs', 'Est\\.?', 'Centre', 'Parade', 'City', 'Upr\\.?', 'Lwr\\.?', 
+                        'Building','Gardens', 'Hall', 'Valley', 'View', 'Demesne', 'Town', 'Village', 
+                        'Trees', 'Bu[ií]', 'Bar', 'Yard', 'Wharf', 'Dock', 'Canal', 'Church')
+
+#words that need an underscore after:
+address_words_before = c('The', 'Co\\.','Co', 'County', 'Sr[aá]id', 'Mount', 'Apt\\.?s?','Apartments?', 'Na', 'An', 'Ard',
+                         'Old', 'No.?', 'Upper', 'Lower', 'Sliabh', 'Fr', 'Rath'
+                         , 'North', 'South', 'East', 'West', 'Cois', 'St\\.?', 'Unit', 
+                         'P[aá]irc', 'Cnoc', 'Est\\.?', 'on', 'Coill', 
+                         'Sl[ií]', "Block", 'D[uú]n', 'Gleann', 'Royal', 'Ros', 
+                         'Le', 'Upr\\.?', 'Lr', 'Lwr\\.?', 'Lough', 'Baile', 'Bothair', 'Tigh')
+# The comma problem? 
+#Need to do spelling check on the placenames identified in the area. 
+#Mc seems to pup up as it's own word (as in Mc Kee Rd)
+house_words <- c('Apt', 'House', 'Flat', 'Block', 'No', 
+                 'Apartment,?s?', 'Apts', 'Unit', 'Cottage', 'Site', 
+                 'Bungalow', 'Rear')
+
+# address_words_before_ regex <- str_c(address_words, collapse = '|')
+address_words_after_regex <- paste0('(?<!,) (?=(', str_c(address_words_after, collapse = '|'), ')\\b)')
+address_words_before_regex <- paste0('(?<=(', str_c(address_words_before, collapse = '|'), ')\\b) ')
+house_words_before_regex <- paste0('(',  str_c(house_words, collapse = '|'), ') +?')
+
+#this can be sped up by making a giant regex
+
+
+# This will remove things like 'Co Dublin' and 'Dublin 11' etc
+#it can be updated to work for any county. 
+property$address_ <- str_replace(property$address, regex(',?( ?(co(unty)?)?\\.? ?)?dublin( ?\\d+?w?[[:punct:]]?)?$', ignore_case = T), '')
+
+
+
+                               
+#we still haven't fixed up cases of 'D7'
+# property[str_detect(property_address_, '[Dd]\\d+$') %>% which, ] %>% view
+#nor have we detected where the address says 'Dublin 9' but the postcode is 'D11' etc. 
+#my suspicion is that the raw address will be more correct, although we can potentialy verify it
+
+
+property$address_  <- 
+  property$address_ %>% 
+  str_replace_all ('\\.', '') %>% #Co., Apt. etc
+  str_replace('Co(unty)?\\b.*$', '') %>% 
+  str_replace_all("\\(|\\)", ', ') %>%  #(inclusive), (corner house) etc
+  str_replace_all(house_words_before_regex, '' )  %>% #Apt 7, ...
+  str_replace('^\\d+[[:alpha:]]?,? +', '') %>%  # 11b, 
+  str_replace_all(address_words_after_regex, '_' ) %>% #Main St --> Main_St
+  str_replace_all(address_words_before_regex, '_' )  %>% #North Circular --> North_Circular
+  str_replace('Co_[[:alpha:]]+', '') #Co_Dublin, Co_Louth gonzo
+# View(property)
+  
+  
+property$address_reverse <- 
+  property$address_ %>% 
+  #getting rid of the county is an issue for County_towns like Sligo and Carlow
+  # str_replace_all( property$county, '') %>% 
+  str_replace_all(',', '') %>% 
+  str_split(' ') %>% 
+  sapply(rev) %>% 
+  sapply(str_c,collapse = ', ')
+
+
+saveRDS(property, 'property_pre_post_2022.rds')
+```
+
+
+
+extract_towns_and_areas_dublin
+```{r}
+
+
+extract_towns_and_areas_dublin <-  
+  function(property_area) {
+  property_subset_placenames <-
+    property_area$address_ %>% 
+    str_replace(',? ?$', '') %>% #clean final commas
+    #extract the last placemane in the address_
+    str_extract('(?!, ?)\\S+$')  %>% 
+    # str_c(collapse = ' ') %>% 
+    # str_split(' ')  %>% 
+    # unlist %>% 
+    str_replace_all('[[:punct:]]$', '') %>% 
+    str_replace_all('[[:punct:]]+_', '_') %>% #shoulda been done earlier
+    table() %>% 
+    sort(decreasing = T) %>% 
+    .[str_detect(names(.), '\\d') == F &
+        str_detect(names(.),'[[:alpha:]]')] 
+  
+  #cut off is 10% of all places in the area, or 400
+  # this will differ between dublin and non-dublin
+  cut_off <- if (length(property_area$address_)/10 > 200 ){ 200 } else length(property_area$address_)/10
+  # cut_off <- 20
+  property_subset_towns <- property_subset_placenames %>%  .[ . > cut_off] %>% names()
+  property_subset_towns_regex <-
+    paste0('\\b', property_subset_towns,  '\\b')  %>%  #[2:length(property_subset_towns)]
+    str_c(collapse = '|')
+  # .[2:length(.)] %>%  #Gets rid of the county name which is always the largest group
+  
+  property_area$town1 <- str_extract(property_area$address_reverse, property_subset_towns_regex)  
+  
+
+  # property_area$town1 %>% table(useNA = 'ifany') %>% sort(decreasing = T) %>% View
+  #here's all the rest of the placenames, smaller than the cut-off
+  property_subset_placenames_regex <-
+    paste0('\\b', names(property_subset_placenames)[(1 + length(property_subset_towns)) :length(property_subset_placenames)],  '\\b')  %>%
+    str_c(collapse = '|')
+
+  
+  property_area$town2 <- 
+    if_else(is.na(property_area$town1), 
+            property_area$address_reverse,
+            str_replace(property_area$address_reverse, property_area$town1, '') ) %>% 
+    str_extract(property_subset_placenames_regex)
+  #remove the bigger town
+  
+  # property_area$town2 %>% table(useNA = 'ifany') %>% sort(decreasing = F)
+  
+  
+  # View(property_area)
+  
+  big_town_small_town_pairs <-
+    #match up the big towns and small towns
+    table(property_area$town1, property_area$town2, useNA = 'ifany') %>%  
+    as.data.frame (stringsAsFactors = F) %>% 
+    filter (Freq > 0) %>% 
+    # ,  # technically redundant 
+    # is.na(Var1) == F)
+    # )%>%  #NA occurs when the small town is marked but not the big town. we are extrapolating from cases where both are marked. 
+    group_by(town2 = Var2) %>% 
+    summarise(max = max(Freq), 
+              town1b = Var1[Freq == max]) 
+  
+  # View(big_town_small_town_pairs)
+  
+  left_join(property_area, big_town_small_town_pairs[c('town1b', 'town2')], by = 'town2') 
+
+                           
+  # %>% 
+  #   pull(town1) %>% 
+  #   table(useNA = 'ifany') %>% 
+  #   View
+  
+}
+
+```
+
+
+Dublin addresses with a postcode D1-2, D3-24, Beyond 
+Beyond are only 2022 and have been extracted from the eircode
+```{r}
+
+
+dublin_3_to_24_dfrms <- 
+  property %>%
+  filter(county == "Dublin", 
+         str_detect(postcode, '^D\\d'), 
+         !postcode %in% c('D01', 'D02', 'D25')) %>% 
+  group_by(postcode) %>% 
+  group_split()
+
+
+
+dublin_1_2 <- 
+  property %>%  
+  filter( postcode %in% c('D01', 'D02'))  %>% 
+  mutate(town1 = postcode, 
+         town2 = NA_character_,
+         town1b = NA_character_)
+
+
+dublin_postcodes_new <-
+  property %>%
+  filter(county == "Dublin", 
+         #remove d1-24
+  str_detect(postcode, '^D\\d') == F) %>% 
+  pull(postcode) %>% 
+  table() %>% 
+  #remove typo (or Freq of 1 or 2)
+  .[.> 2] %>% 
+  names
+         
+         
+dublin_beyond_24_postcode_dfrms <- 
+  property %>%
+  filter(county == "Dublin", 
+         postcode %in% dublin_postcodes_new) %>% 
+  group_by(postcode) %>% 
+  group_split()
+
+
+dublin_new_postcodes <- map_dfr(dublin_beyond_24_postcode_dfrms, extract_towns_and_areas_dublin) 
+# For the new postcodes I'm reversing the order cos Adamstown is not being picked up
+dublin_new_postcodes <- 
+  dublin_new_postcodes %>% 
+  mutate(town1 = if_else(is.na(town1), 
+                         town2, 
+                         town1), 
+         town1 = if_else(is.na(town1), 
+                         town1b, 
+                         town1)
+  )
+      
+
+dublin_3_to_24 <- map_dfr(dublin_3_to_24_dfrms, extract_towns_and_areas_dublin)
+#Tidy towns!
+dublin_3_to_24 <- dublin_3_to_24 %>% 
+  mutate(town1 = if_else(is.na(town1), 
+                         town1b, 
+                         town1), 
+         town1 = if_else(is.na(town1), 
+                         town2, 
+                         town1)
+  )
+
+#Dublins 3-24
+
+# dublin_postcode_dfrms %>% length()
+# lapply(dublin_postcode_dfrms[1:3], extract_towns_and_areas_dublin)
+
+dublin <- bind_rows(dublin_1_2, dublin_3_to_24, dublin_new_postcodes) %>% arrange(date, county, postcode)
+# View(dublin)
+
+# dublin %>% 
+#   relocate(starts_with('town'), .before = 'postcode') %>% 
+#   View
+
+# View(dublin %>%
+#   relocate(town1, town1b, town2, .before = 'postcode')) # %>% 
+# 
+
+
+# table(dublin$town1, dublin$postcode, useNA = 'ifany') %>% as.data.frame %>% filter(Freq > 0) %>% View #%>% sort(decreasing = T)
+#this is pretty damn accurate
+#sometimes the eircode is completely out, like Baggot_St_Lower being A94 (ballyboughal)
+
+# spelling is a big problem but does'nt always damage the postcode
+# View(dublin %>% filter(is.na(town1)))
+```
+
+
+<!-- Debug problematic postcodes below -->
+<!-- ```{r} -->
+<!-- View(dublin_new_postcodes) -->
+
+<!--     View(dublin_new_postcodes)   -->
+
+<!--     table(dublin_new_postcodes$postcode, dublin_new_postcodes$town1) %>%  -->
+<!--       as.data.frame %>%  -->
+<!--       filter(Freq > 0) %>%  -->
+<!--       View -->
+<!-- ``` -->
+
+
+
+So next we need to deal with all of the Dublin places without a postcode. 
+We'll do this by matching the postcodes back up with the towns attached to them 
+
+```{r}
+
+# How many properties have no town?
+dublin_no_postcode <- property %>%
+  filter(county == "Dublin", 
+         is.na(postcode))  ##69283
+     # nrow(dublin) #107892
+#   property %>%s
+#   filter(county == "Dublin") 
+#   #176119
+
+ #Extract the first town from the address
+  dublin_no_postcode$town1 <- str_extract(dublin_no_postcode$address_reverse, '[[a-zA-Z-_]]+')
+ #Extract the second town'
+  dublin_no_postcode$town2 <- 
+    #remove the first town and then extract what's left 
+    #this is the wrong way to do it)
+    str_replace(dublin_no_postcode$address_reverse, dublin_no_postcode$town1, '') %>% 
+    str_extract( '[[a-zA-Z-_]]+')
+  
+  dublin_no_postcode$town2  %>% table %>% View
+  
+  # dublin_no_postcode %>% View
+  
+  # View(dublin_no_postcode %>%
+  # relocate(town1, town2, .before = 'postcode')) # %>%
+  # 
+# So that leaves 176119 - 107892 Dublin properties without a town
+postcode_town_combos <-
+  table(dublin$postcode, dublin$town1) %>% 
+  as.data.frame (stringsAsFactors = F) %>% 
+  filter (Freq > 0) %>% 
+  arrange( Var1)  %>% 
+  rename(postcode = Var1, 
+         town = Var2) %>% 
+  group_by(town) %>% 
+    mutate( max = max(Freq),
+            #We need percentages for later when checking which places genuinely fall across multiple postcodes (e.g. Rathfarnham)
+            percentage = Freq/sum(Freq), 
+         count = n()) 
+
+# View(postcode_town_combos)
+postcode_town_max_only <- 
+  postcode_town_combos %>%  
+  filter(Freq == max) %>% 
+  ungroup %>% 
+  distinct(postcode, town)
+# View(postcode_town_max_only %>% 
+#        group_by(town) %>% 
+#        mutate(count2 = n()) %>% 
+#        arrange(count2 %>% desc, town)) 
+
+dublin_no_postcodes_fixed <- 
+  left_join(dublin_no_postcode, postcode_town_max_only, by =  c('town1' = 'town'))  %>% 
+  mutate(postcode = postcode.y) %>% 
+  select(-c(postcode.x, postcode.y)) 
+  #there are some errors due to mislabelled postcodes (see duplicate groups above)
+  # distinct()
+#the left join is causing duplicates in towns that have two mex frequences (i.e. two towns have 50%)
+
+# View(dublin_no_postcodes_fixed)
+
+dublin2 <- 
+  bind_rows(dublin, dublin_no_postcodes_fixed) %>% 
+  arrange(date, postcode) %>% 
+  relocate(town1, postcode, .before = 'eircode') 
+  # View(dublin2)
+
+  #  table(dublin2$postcode, dublin2$town1) %>% 
+  #    as.data.frame %>% 
+  #    filter(Freq > 0) %>% 
+  #    arrange(postcoden = Var1) %>% 
+  #    View
+  #  
+  #  nrow(dublin2) #180213
+  #  # so there's like 4k duplicates
+  # #we are donw to 178k now 
+  #  
+   # View(dublin2)
+   # nrow(property)
+   # 
+   # property %>% filter(county == 'Dublin') %>% nrow
+
+saveRDS(dublin2, 'dublin_properties_with_town_and_postcodes.rds')
+```
+
+
+
+
+
+
+
+
+Dealing with postcodes and towns
+This is too problematic because the regex is too prone to use mistakes for 
+```{r, eval = F}
+property <-
+  property %>% 
+  mutate(town_take1= str_extract(address_, '(?<= )([[a-zA-Z]]|_)+$')) %>% 
+  relocate(town_take1, .before = "postcode")
+
+towns_by_county_and_postcode <- table(property$county, property$postcode, property$town_take1) %>% as.data.frame (stringsAsFactors = F) %>% filter(Freq > 0) 
+
+towns_by_county_and_postcode_regexes <- 
+  towns_by_county_and_postcode %>% #nrow #6102
+  group_by(county = Var1, 
+           postcode = Var2) %>% 
+  mutate(count = n()) %>% 
+  group_by(county, town =Var3) %>%  
+    mutate(percentage = Freq/sum(Freq), 
+         count = n()) %>% 
+  filter(percentage > 0.2) %>% #View#nrow #4986
+  group_by(county, postcode) %>% 
+  summarise(towns = list(town) %>%  sapply(function(town_name) {paste0('\\b', town_name,  '\\b')  %>%  str_c(collapse = '|')}))  
+
+towns_by_county_and_postcode_regexes %>% View
+  
+add_postcode_to_property_subset <- function(county_inq, postcode_inq, postcode_regex){
+    property %>% 
+  filter(county == county_inq) %>% 
+  mutate(postcode = if_else(str_detect(address_, postcode_regex), 
+                            postcode_inq, 
+                            postcode), 
+         town_match = str_extract(address_, postcode_regex)) %>% 
+    filter(postcode == postcode_inq)
+}
+
+
+
+
+property_output <- list()
+for (i in 1:nrow(towns_by_county_and_postcode_regexes)) { 
+  property_output[[i]] <- add_postcode_to_property_subset(towns_by_county_and_postcode_regexes[1][[1]][[i]] ,
+                                  towns_by_county_and_postcode_regexes[2][[1]][[i]], 
+                                  towns_by_county_and_postcode_regexes[3][[1]][[i]]
+                                  ) %>% 
+  filter(postcode == towns_by_county_and_postcode_regexes[2][[1]][[i]]) 
+  
+}
+
+property2 <- bind_rows(property_output)
+View(property2)
+
+
+county_inq = towns_by_county_and_postcode_regexes[1][[1]][[i]]; postcode_inq = towns_by_county_and_postcode_regexes[2][[1]][[i]]; postcode_regex = towns_by_county_and_postcode_regexes[3][[1]][[i]]
+add_postcode_to_property_subset()
+
+add_postcode_to_property_subset(county, postcode_inq, postcode_regex) %>% 
+  filter(postcode == postcode_inq) 
+property_output[[4]]
+i = 2
+```
+
+
+```{r, eval = F}
+towns_by_county_and_postcode_regexes[1][[1]][[1]]
+towns_by_county_and_postcode_regexes[2][[1]][[1]]
+towns_by_county_and_postcode_regexes[3][[1]][[1]]
+pmap(towns_by_county_and_postcode_regexes[2,], add_postcode_to_property_subset ) 
+  View
+?pmap
+county_inq = 'Carlow'; postcode_inq = 'R21'; postcode_regex = "\\bBagenals_Town\\b|\\bBagenalstown\\b|\\bMuinebheag\\b"
+add_postcode_to_property_subset(county, postcode_inq, postcode_regex) %>% 
+  filter(postcode == postcode_inq) 
+towns_by_county_and_postcode_regexes[1,1]
+add_postcode_to_property_subset(towns_by_county_and_postcode_regexes[1,1], towns_by_county_and_postcode_regexes[1,2], towns_by_county_and_postcode_regexes[1,3])
+
+towns_by_county_and_postcode_regexes[1,1] 
+#loop through the dublin_no_postcode dfrm, to find matches for the towns regex associated with each 
+for(i in 1:nrow(postcode_town_regex_dfrm)){
+  dublin_no_postcode$postcode = 
+  if_else(str_detect(dublin_no_postcode$address_, postcode_town_regex_dfrm$towns[[i]] ),
+          postcode_town_regex_dfrm$postcode[[i]], 
+          dublin_no_postcode$postcode )
+}
+
+
+  View
+View(postcode_town_max_only)
+# Potential errogroups()
+    postcode_town_combos %>% View  
+      
+    )
+  mutate() %>% 
+  filter(percentage > 0.2)
+#we need to remove places with the wrong postcode
+# View(postcode_town_combos)
+# postcode_town_combos %>% 
+#   group_by(town ) %>% 
+#   mutate(overlaps = n()) %>% 
+#   arrange (overlaps %>% desc, town) %>% View
+
+postcode_town_regex_dfrm <-
+  postcode_town_combos %>% 
+  group_by(postcode) %>% 
+  summarise(towns = list(town) %>%  sapply(function(town_name) {paste0('\\b', town_name,  '\\b')  %>%  str_c(collapse = '|')})) 
+  View(postcode_town_regex_dfrm)
+  
+  
+
+
+#loop through the dublin_no_postcode dfrm, to find matches for the towns regex associated with each 
+for(i in 1:nrow(postcode_town_regex_dfrm)){
+  dublin_no_postcode$postcode = 
+  if_else(str_detect(dublin_no_postcode$address_, postcode_town_regex_dfrm$towns[[i]] ),
+          postcode_town_regex_dfrm$postcode[[i]], 
+          dublin_no_postcode$postcode )
+}
+
+
+dublin_no_postcode 
+# 
+# # View(dublin_all)
+# table(dublin_no_postcode$postcode, useNA = 'ifany')
+# View(dublin_no_postcode)
+# table(is.na(dublin_all$postcode), dublin_all$year, useNA = 'ifany') 
+# View(postcode_town_regex_dfrm)
+# dublin_all$postcode <- 
+#   map2_chr(postcode_town_regex_dfrm$towns, postcode_town_regex_dfrm$postcode, ~   if_else(str_detect(dublin_all$address_, .x ),
+#           .y,
+#           dublin_all$postcode ))
+
+
+```
+
+
+
+
+```{r} 
+    
+filter(property, county == 'Dublin', 
+       is.na(postcode)) %>% 
+  View
+
+
+
+not_dublin_dfrms <- 
+  property %>%
+  filter(county != "Dublin") %>% 
+  group_by(county) %>% 
+  group_split()
+
+not_dublin <- map_dfr(not_dublin_dfrms, extract_towns_beyond_dublin)
+# not_dublin %>% View
+
+property <- bind_rows(dublin, not_dublin, dublin1_2) %>% arrange(county, postcode)
+
+```
+
+
+
+```{r}
+table(dublin$postcode, dublin$town1) %>% as.data.frame %>% filter(Freq > 0) %>% View
+
+#match towns with postcodes
+
+# table(dublin$postcode, dublin$town1)
+```
+
+Now we need to extract the towns for all of the Dublin postcodes outside D1-24
+```{r}
+
+
+# table(dublin_beyond_24_postcode_dfrms$postcode, useNA = 'ifany')
+
+
+```
+
+
+
+
+```{r}
+
+property_area <- property %>% filter(postcode == 'D15')
+property_area %>% View
+not_dublin_dfrms %>% length
+
+#locate the problem by running through the postcode groups
+#issue is that D25 is a typo and there's only 1 so i'ts not workign
+# length(dublin_postcode_dfrms)
+dublin <- map_dfr(dublin_postcode_dfrms, extract_towns_and_areas_dublin) 
+View(dublin)
+table(dublin$postcode, useNA = 'ifany') %>% barplot
+
+# $
+# 10:15 are good
+# property_area <- dublin_postcode_dfrms[3][[1]]
+# View(property_area)
+property_area <- dublin_beyond_24_postcode_dfrms[2][[1]]
+property_area <- dublin_postcode_dfrms[10][[1]]
+ map_dfr(dublin_beyond_24_postcode_dfrms, extract_towns_and_areas_dublin) %>% View
+```
+
+
+Next up we need to map the towns to the non D1-24 postcodes and do a re-run through the dataset. 
+e.g. K78 is Lucan so we will need to retrospectively put that into the postcode for all the Lucan sales, etc
+But we need to extract the towns first
+
+```{r}
+
+```
+
+
+
+```{r}
+
+
+
+extract_towns_and_areas_dublin <-  
+  function(property_area) {
+  property_subset_placenames <-
+    property_area$address_ %>% 
+    str_replace(',? ?$', '') %>% #clean final commas
+    #extract the last placemane in the address_
+    str_extract('(?!, ?)\\S+$')  %>% 
+    # str_c(collapse = ' ') %>% 
+    # str_split(' ')  %>% 
+    # unlist %>% 
+    str_replace_all('[[:punct:]]$', '') %>% 
+    str_replace_all('[[:punct:]]+_', '_') %>% #shoulda been done earlier
+    table() %>% 
+    sort(decreasing = T) %>% 
+    .[str_detect(names(.), '\\d') == F &
+        str_detect(names(.),'[[:alpha:]]')] 
+  
+  #cut off is 10% of all places in the area, or 400
+  # this will differ between dublin and non-dublin
+  cut_off <- if (length(property_area$address_)/10 > 200 ){ 200 } else length(property_area$address_)/10
+  # cut_off <- 20
+  property_subset_towns <- property_subset_placenames %>%  .[ . > cut_off] %>% names()
+  property_subset_towns_regex <-
+    paste0('\\b', property_subset_towns,  '\\b')  %>%  #[2:length(property_subset_towns)]
+    str_c(collapse = '|')
+  # .[2:length(.)] %>%  #Gets rid of the county name which is always the largest group
+  
+  property_area$town1 <- str_extract(property_area$address_reverse, property_subset_towns_regex)  
+  
+#the following fails if there are no towns below the cut off
+  
+  # property_area$town1 %>% table(useNA = 'ifany') %>% sort(decreasing = T) %>% View
+  #here's all the rest of the placenames, smaller than the cut-off
+  property_subset_placenames_regex <-
+    paste0('\\b', names(property_subset_placenames)[(1 + length(property_subset_towns)) :length(property_subset_placenames)],  '\\b')  %>%
+    str_c(collapse = '|')
+
+  #town2 is defined with a regex matching a non-town1 town in address_reverse, BUT ONLY IF town1 == NA. This is causing issues. 
+  property_area$town2 <- 
+    if_else(is.na(property_area$town1), 
+            property_area$address_reverse,
+            str_replace(property_area$address_reverse, property_area$town1, '') ) %>% 
+    str_extract(property_subset_placenames_regex)
+  #remove the bigger town
+  
+  # property_area$town2 %>% table(useNA = 'ifany') %>% sort(decreasing = F)
+  
+  
+  # View(property_area)
+  #creates a mapping between Town2 and Town1
+  # so Blakestown Rd is matched up with Clonsilla
+  big_town_small_town_pairs <-
+    #match up the big towns and small towns
+    table(property_area$town1, property_area$town2, useNA = 'ifany') %>%  #
+    as.data.frame (stringsAsFactors = F) %>% 
+    filter (Freq > 0) %>% 
+    # ,  # technically redundant 
+    # is.na(Var1) == F)
+    # )%>%  #NA occurs when the small town is marked but not the big town. we are extrapolating from cases where both are marked. 
+    group_by(town2 = Var2) %>% 
+    summarise(max = max(Freq), 
+              town1b = Var1[Freq == max]) 
+  
+  # View(big_town_small_town_pairs)
+  
+  #Then we join the town2 / town1b with the original dfrm
+  #then once all of the postcode dfrms we can match up town1 and town1b
+  left_join(property_area, big_town_small_town_pairs[c('town1b', 'town2')], by = 'town2') 
+
+                           
+  # %>% 
+  #   pull(town1) %>% 
+  #   table(useNA = 'ifany') %>% 
+  #   View
+  
+}
+
+
+
+extract_towns_beyond_dublin <- function(property_area) {
+  
+  property_subset_placenames <-
+    property_area$address_ %>% 
+    str_replace(',? ?$', '') %>% #clean final commas
+    #extract the last placemane in the address_
+    str_extract('(?!, ?)\\S+$')  %>% 
+    str_replace_all('[[:punct:]]$', '') %>% 
+    str_replace_all('[[:punct:]]+_', '_') %>% #shoulda been done earlier
+    table() %>% 
+    sort(decreasing = T) %>% 
+    .[str_detect(names(.), '\\d') == F &
+        str_detect(names(.),'[[:alpha:]]')] %>% 
+    as.data.frame
+  
+  property_subset_towns <- 
+    property_subset_placenames %>%  
+    filter(Freq > 5 ) %>% 
+    # &  #cut off
+    #    #remove streets in the main town, regex needs work
+    #   str_detect(., '_(Rd\\.?|Road|St)') == F) %>% 
+    pull('.')
+  
+  property_subset_towns_regex <-
+    paste0('\\b', property_subset_towns,  '\\b')  %>%  
+    str_c(collapse = '|')
+  
+  property_area$town1 <- str_extract(property_area$address_reverse, property_subset_towns_regex)
+  property_area$town2 <-  str_replace(property_area$address_reverse, property_area$town1, '') %>% str_extract(property_subset_towns_regex)
+  
+  property_area$town1 <-
+    if_else(property_area$town1 == property_area$county[[1]]  & 
+              str_detect(property_area$town2, '_') == F & 
+              property_area$town2 %in% property_subset_towns , 
+            property_area$town2, 
+            property_area$town1)
+  
+  return(property_area)
+  
+}
+
+
+
+#We have an olgorithm for all of Dublin (but not yet D01/D02 which lack town names)
+#Next we need to adjust for non-Dublin
+#paying special attention to 
+dublin_postcode_dfrms <- 
+  property %>%
+  filter(county == "Dublin") %>% 
+  group_by(postcode) %>% 
+  group_split()
+
+not_dublin_dfrms <- 
+  property %>%xx
+  filter(county != "Dublin") %>% 
+  group_by(county) %>% 
+  group_split()
+
+dublin1_2 <- 
+  property %>%  
+  filter( postcode %in% c('D01', 'D02'))  %>% 
+  mutate(town1 = postcode, 
+         town2 = NA_character_)
+
+# dublin_postcode_dfrms %>% length()
+# lapply(dublin_postcode_dfrms[1:3], extract_towns_and_areas_dublin)
+dublin <- map_dfr(dublin_postcode_dfrms[3:length(dublin_postcode_dfrms)], extract_towns_and_areas_dublin) 
+dublin <- dublin %>% 
+  mutate(town1 = if_else(is.na(town1), 
+                         town1b, 
+                         town1), 
+         town1 = if_else(is.na(town1), 
+                         town2, 
+                         town1)
+  )
+
+
+not_dublin <- map_dfr(not_dublin_dfrms, extract_towns_beyond_dublin)
+# not_dublin %>% View
+
+property <- bind_rows(dublin, not_dublin, dublin1_2) %>% arrange(county, postcode)
+
+```
+
+
